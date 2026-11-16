@@ -1,0 +1,14 @@
+# MQTT
+paho-mqtt>=2.0,<3.0
+
+# Validação e configuração
+pydantic>=2.0
+python-dotenv>=1.0
+
+# Dashboard
+streamlit
+plotly
+pandas
+
+# Testes
+pytest
