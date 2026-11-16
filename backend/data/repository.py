@@ -1,0 +1,1 @@
+# salvar leitura e ultimas leituras

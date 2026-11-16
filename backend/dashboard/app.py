@@ -1,0 +1,1 @@
+# lê do repository.py, não fala MQTT

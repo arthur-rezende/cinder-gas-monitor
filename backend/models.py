@@ -1,0 +1,1 @@
+# dataClasses/Pydantic: Leitura, Evento
