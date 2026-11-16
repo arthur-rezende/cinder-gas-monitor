@@ -1,0 +1,21 @@
+# Ambiente virtual
+venv/
+.venv/
+
+# Cache do Python
+_pycache_/
+*.pyc
+
+# Segredos (senha do broker)
+.env
+
+# Banco local e logs
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Testes
+.pytest_cache/
+.vscode/
+.idea/
