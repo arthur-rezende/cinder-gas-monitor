@@ -19,3 +19,6 @@ _pycache_/
 .pytest_cache/
 .vscode/
 .idea/
+
+conexão ao banco de dados
+backend/.env
