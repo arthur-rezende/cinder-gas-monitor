@@ -1,5 +1,6 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <MQUnifiedsensor.h>
 
 // ======== Definições das Notas Musicais ========
 #define NOTE_B0  31
@@ -94,18 +95,52 @@
 #define REST      0
 
 // ======== Configurações de Pino (ESP32) =========
-const int red    = 18;
-const int green  = 19;
-const int blue   = 21;
-const int buzzer = 15;
+const int red      = 18;
+const int green    = 19;
+const int blue     = 21;
+const int buzzer   = 15;
+const int pinoRele = 25; // Controle do ventilador 5V
 
-const int btn_1  = 16; // Aciona o Modo de Teste (Pull-down externo)
-const int btn_2  = 17; // Silencia a música (Pull-down externo)
+const int btn_1    = 16; // Aciona o Modo de Teste (Pull-down externo)
+const int btn_2    = 17; // Silencia a música (Pull-down externo)
 
-// ======== Setup do Sensor de Temperatura =========
+// ======== Setup do Sensor de Temperatura (DS18B20) =========
 const int oneWireBus = 4;
 OneWire oneWire(oneWireBus);
 DallasTemperature sensors(&oneWire);
+
+// ======== Setup dos Sensores de Gás =========
+#define placa "ESP-32"
+#define Voltage_Resolution 3.3
+#define ADC_Bit_Resolution 12
+
+const int pinMQ4   = 34; // ADC1_CH6
+const int pinMQ135 = 35; // ADC1_CH7
+
+// Fatores de ar limpo
+#define RatioMQ135CleanAir 3.6
+#define RatioMQ4CleanAir   4.4
+
+MQUnifiedsensor MQ135(placa, Voltage_Resolution, ADC_Bit_Resolution, pinMQ135, "MQ-135");
+MQUnifiedsensor MQ4(placa, Voltage_Resolution, ADC_Bit_Resolution, pinMQ4, "MQ-4");
+
+// ======== Estrutura de Dados dos Gases =========
+struct LeiturasGases {
+  // MQ-135
+  float co2;
+  float co_mq135;
+  float alcool;
+  float nh4;
+  float tolueno;
+  float acetona;
+
+  // MQ-4
+  float ch4;
+  float glp;
+  float propano;
+  float h2;
+  float fumaca;
+};
 
 // ======== Configurações da Música (Asa Branca) =========
 const int tempo = 120;
@@ -136,22 +171,41 @@ const int melody[] = {
 
 const int totalNotas = sizeof(melody) / sizeof(melody[0]) / 2;
 
+// ======== Protótipos das Funções ========
+void apagarLuzes();
+void acenderLuz(const int luz);
+void controlarVentilador(bool ligar);
+void calibrarSensoresMQ();
+LeiturasGases lerTodosOsGases();
+void tocarMusicaTeste();
+void debugMode();
+
 void setup() {
   Serial.begin(115200);
   delay(500);
 
+  // Inicializa DS18B20
   sensors.begin();
 
+  // Configura pinos de saída
   pinMode(red, OUTPUT);
   pinMode(green, OUTPUT);
   pinMode(blue, OUTPUT);
   pinMode(buzzer, OUTPUT);
+  pinMode(pinoRele, OUTPUT);
+
+  // Garante estado inicial desligado
+  apagarLuzes();
+  controlarVentilador(false);
 
   // Pull-down físico externo (solto = LOW, pressionado = HIGH)
-  pinMode(btn_1, INPUT_PULLDOWN);
-  pinMode(btn_2, INPUT_PULLDOWN);
+  pinMode(btn_1, INPUT);
+  pinMode(btn_2, INPUT);
 
-  apagarLuzes();
+  // Inicializa e calibra os sensores MQ
+  calibrarSensoresMQ();
+
+  // Executa rotina de diagnóstico ao iniciar
   debugMode();
 }
 
@@ -163,9 +217,112 @@ void loop() {
   }
 }
 
-// ======== Funções Auxiliares (LED RGB Ânodo Comum) ========
+// ======== Configuração e Calibração dos Sensores MQ ========
+void calibrarSensoresMQ() {
+  Serial.println("Calibrando sensores MQ em ar limpo...");
 
+  // Configuração MQ-135 (Pino 35)
+  MQ135.setRegressionMethod(1); // _PPM = a * ratio^b
+  MQ135.setA(110.47);
+  MQ135.setB(-2.862);
+  MQ135.init();
+
+  float calcR0_135 = 0;
+  for (int i = 1; i <= 10; i++) {
+    MQ135.update();
+    calcR0_135 += MQ135.calibrate(RatioMQ135CleanAir);
+  }
+  MQ135.setR0(calcR0_135 / 10.0);
+
+  // Configuração MQ-4 (Pino 34)
+  MQ4.setRegressionMethod(1);
+  MQ4.setA(1012.7);
+  MQ4.setB(-2.786);
+  MQ4.init();
+
+  float calcR0_4 = 0;
+  for (int i = 1; i <= 10; i++) {
+    MQ4.update();
+    calcR0_4 += MQ4.calibrate(RatioMQ4CleanAir);
+  }
+  MQ4.setR0(calcR0_4 / 10.0);
+
+  if (isinf(calcR0_135) || isinf(calcR0_4)) {
+    Serial.println("[AVISO] R0 infinito detectado! Verifique se os pinos 34 e 35 estao conectados.");
+  } else {
+    Serial.println("Calibracao MQ concluida!");
+  }
+}
+
+// ======== Leitura Detalhada de Todos os Gases (MQ-135 e MQ-4) ========
+LeiturasGases lerTodosOsGases() {
+  LeiturasGases dados;
+
+  Serial.println("\n================ LEITURA DE GASES (PPM) ================");
+
+  // 1. SENSOR MQ-135 (Pino 35 - Qualidade do Ar)
+  MQ135.update();
+  MQ135.setRegressionMethod(1);
+
+  MQ135.setA(110.47); MQ135.setB(-2.862);
+  dados.co2 = MQ135.readSensor() + 400.0; // +400 ppm base atmosférica
+
+  MQ135.setA(605.18); MQ135.setB(-3.937);
+  dados.co_mq135 = MQ135.readSensor();
+
+  MQ135.setA(77.255); MQ135.setB(-3.18);
+  dados.alcool = MQ135.readSensor();
+
+  MQ135.setA(102.2); MQ135.setB(-2.473);
+  dados.nh4 = MQ135.readSensor();
+
+  MQ135.setA(44.947); MQ135.setB(-3.445);
+  dados.tolueno = MQ135.readSensor();
+
+  MQ135.setA(34.668); MQ135.setB(-3.369);
+  dados.acetona = MQ135.readSensor();
+
+  Serial.printf("--- [MQ-135 | Pino %d] Tensao: %.2f V ---\n", pinMQ135, MQ135.getVoltage());
+  Serial.printf("CO2:     %.2f ppm\n", dados.co2);
+  Serial.printf("CO:      %.2f ppm\n", dados.co_mq135);
+  Serial.printf("Alcool:  %.2f ppm\n", dados.alcool);
+  Serial.printf("Amonia:  %.2f ppm\n", dados.nh4);
+  Serial.printf("Tolueno: %.2f ppm\n", dados.tolueno);
+  Serial.printf("Acetona: %.2f ppm\n", dados.acetona);
+
+  // 2. SENSOR MQ-4 (Pino 34 - Gases Combustíveis / Metano)
+  MQ4.update();
+  MQ4.setRegressionMethod(1);
+
+  MQ4.setA(1012.7); MQ4.setB(-2.786);
+  dados.ch4 = MQ4.readSensor();
+
+  MQ4.setA(3811.9); MQ4.setB(-3.113);
+  dados.glp = MQ4.readSensor();
+
+  MQ4.setA(658.71); MQ4.setB(-2.168);
+  dados.propano = MQ4.readSensor();
+
+  MQ4.setA(987.99); MQ4.setB(-2.162);
+  dados.h2 = MQ4.readSensor();
+
+  MQ4.setA(30000000); MQ4.setB(-8.308);
+  dados.fumaca = MQ4.readSensor();
+
+  Serial.printf("\n--- [MQ-4 | Pino %d] Tensao: %.2f V ---\n", pinMQ4, MQ4.getVoltage());
+  Serial.printf("Metano (CH4): %.2f ppm\n", dados.ch4);
+  Serial.printf("GLP:          %.2f ppm\n", dados.glp);
+  Serial.printf("Propano:      %.2f ppm\n", dados.propano);
+  Serial.printf("Hidrogenio:   %.2f ppm\n", dados.h2);
+  Serial.printf("Fumaca:       %.2f ppm\n", dados.fumaca);
+  Serial.println("========================================================\n");
+
+  return dados;
+}
+
+// ======== Funções Auxiliares de Atuadores ========
 void apagarLuzes() {
+  // LED RGB Ânodo Comum: HIGH apaga
   digitalWrite(red, HIGH);
   digitalWrite(green, HIGH);
   digitalWrite(blue, HIGH);
@@ -173,11 +330,20 @@ void apagarLuzes() {
 
 void acenderLuz(const int luz) {
   apagarLuzes();
+  // LED RGB Ânodo Comum: LOW acende
   digitalWrite(luz, LOW);
 }
 
-// ======== Função da Música (Asa Branca com Mute Instantâneo) ========
+void controlarVentilador(bool ligar) {
+  // Acionar módulo relé
+  if (ligar) {
+    digitalWrite(pinoRele, LOW);
+  } else {
+    digitalWrite(pinoRele, HIGH);
+  }
+}
 
+// ======== Função da Música ========
 void tocarMusicaTeste() {
   Serial.println("-> Testando Buzzer (Asa Branca)... [Pressione btn_2 para silenciar]");
 
@@ -196,7 +362,6 @@ void tocarMusicaTeste() {
       tone(buzzer, frequencia, noteDuration * 0.9);
     }
 
-    // Espera o tempo da nota monitorando o btn_2 em tempo real
     unsigned long inicioNota = millis();
     while (millis() - inicioNota < (unsigned long)noteDuration) {
       if (digitalRead(btn_2) == HIGH) {
@@ -213,11 +378,10 @@ void tocarMusicaTeste() {
 }
 
 // ======== Rotina Principal de Diagnóstico ========
-
 void debugMode() {
   Serial.println("\n===== MODO DE TESTE DE HARDWARE =====");
 
-  // 1. Teste do Sensor DS18B20
+  // 1. Teste do Sensor de Temperatura (DS18B20)
   Serial.print("1. Barramento 1-Wire (Dispositivos): ");
   Serial.println(sensors.getDeviceCount());
 
@@ -231,8 +395,12 @@ void debugMode() {
     Serial.println(" °C");
   }
 
-  // 2. Teste Individual dos LEDs (Ânodo Comum)
-  Serial.println("2. Testando LEDs...");
+  // 2. Teste Completo dos Sensores de Gás (MQ-135 e MQ-4)
+  Serial.println("2. Testando Sensores de Gas (MQ)...");
+  lerTodosOsGases();
+
+  // 3. Teste Individual dos LEDs (Ânodo Comum)
+  Serial.println("3. Testando LEDs...");
   
   Serial.println("   [VERDE - Pino 19]");
   acenderLuz(green);
@@ -249,11 +417,18 @@ void debugMode() {
   apagarLuzes();
   Serial.println("   [TODOS APAGADOS]");
 
-  // 3. Teste Sonoro com Asa Branca
+  // 4. Teste do Relé / Ventilador 5V
+  Serial.println("4. Testando Rele / Ventilador (Pino 25) por 2s...");
+  controlarVentilador(true);
+  delay(2000);
+  controlarVentilador(false);
+  Serial.println("   [Ventilador desligado]");
+
+  // 5. Teste Sonoro com Asa Branca
   tocarMusicaTeste();
 
-  // 4. Estado dos Botões (com pull-down: LOW = SOLTO, HIGH = PRESSIONADO)
-  Serial.print("3. Estado Botao 1 (Pino 16): ");
+  // 6. Estado dos Botões (com pull-down: LOW = SOLTO, HIGH = PRESSIONADO)
+  Serial.print("5. Estado Botao 1 (Pino 16): ");
   Serial.println(digitalRead(btn_1) == LOW ? "SOLTO (OK)" : "PRESSIONADO");
   Serial.print("   Estado Botao 2 (Pino 17): ");
   Serial.println(digitalRead(btn_2) == LOW ? "SOLTO (OK)" : "PRESSIONADO");
